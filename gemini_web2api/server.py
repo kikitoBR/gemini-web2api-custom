@@ -219,6 +219,7 @@ class GeminiHandler(BaseHTTPRequestHandler):
         if req is None:
             self.send_json({"error": {"message": "invalid JSON"}}, 400)
             return
+        log(f"Responses request payload: {json.dumps(req, ensure_ascii=False)}")
         model_name, model_id, think_mode, err, extra_fields = resolve_model(
             req.get("model", CONFIG["default_model"]))
         if err:
@@ -258,7 +259,7 @@ class GeminiHandler(BaseHTTPRequestHandler):
                         messages.append(m)
                     else:
                         role = item.get("role", "user")
-                        content = item.get("content", "")
+                        content = item.get("content") or item.get("text", "")
                         if isinstance(content, list):
                             content = " ".join(c.get("text", "") for c in content if c.get("type") in ("text", "input_text"))
                         messages.append({"role": role, "content": content})
@@ -273,8 +274,11 @@ class GeminiHandler(BaseHTTPRequestHandler):
             self.send_json({"error": {"message": "empty input"}}, 400)
             return
 
+        log(f"Parsed messages: {json.dumps(messages, ensure_ascii=False)}")
+        log(f"Compiled prompt summary: {prompt[:300]}...")
         try:
             text = generate(prompt, model_id, think_mode, _upload_images(images), extra_fields)
+            log(f"Gemini response text: {text}")
         except Exception as e:
             self.send_json({"error": {"message": f"upstream error: {e}"}}, 502)
             return
@@ -302,17 +306,89 @@ class GeminiHandler(BaseHTTPRequestHandler):
             self.end_headers()
             ev = {"type": "response.created", "response": {"id": rid, "object": "response", "status": "in_progress", "model": model_name, "output": []}}
             self.wfile.write(f"event: response.created\ndata: {json.dumps(ev)}\n\n".encode())
-            for item in output:
+            for item_idx, item in enumerate(output):
                 if item["type"] == "function_call":
-                    ev = {"type": "response.function_call_arguments.done", "item_id": item["id"], "call_id": item["call_id"], "name": item["name"], "arguments": item["arguments"]}
-                    self.wfile.write(f"event: response.function_call_arguments.done\ndata: {json.dumps(ev)}\n\n".encode())
+                    item_added = {
+                        "type": "response.output_item.added",
+                        "response_id": rid,
+                        "output_index": item_idx,
+                        "item": {
+                            "id": item["id"],
+                            "object": "item",
+                            "type": "function_call",
+                            "status": "in_progress",
+                            "name": item["name"],
+                            "call_id": item["call_id"],
+                            "arguments": ""
+                        }
+                    }
+                    self.wfile.write(f"event: response.output_item.added\ndata: {json.dumps(item_added, ensure_ascii=False)}\n\n".encode())
+                    ev = {"type": "response.function_call_arguments.done", "response_id": rid, "item_id": item["id"], "output_index": item_idx, "call_id": item["call_id"], "name": item["name"], "arguments": item["arguments"]}
+                    self.wfile.write(f"event: response.function_call_arguments.done\ndata: {json.dumps(ev, ensure_ascii=False)}\n\n".encode())
+                    item_done = {
+                        "type": "response.output_item.done",
+                        "response_id": rid,
+                        "output_index": item_idx,
+                        "item": {
+                            "id": item["id"],
+                            "object": "item",
+                            "type": "function_call",
+                            "status": "completed",
+                            "name": item["name"],
+                            "call_id": item["call_id"],
+                            "arguments": item["arguments"]
+                        }
+                    }
+                    self.wfile.write(f"event: response.output_item.done\ndata: {json.dumps(item_done, ensure_ascii=False)}\n\n".encode())
                 elif item["type"] == "message":
+                    item_added = {
+                        "type": "response.output_item.added",
+                        "response_id": rid,
+                        "output_index": item_idx,
+                        "item": {
+                            "id": item["id"],
+                            "object": "item",
+                            "type": "message",
+                            "status": "in_progress",
+                            "role": item.get("role", "assistant"),
+                            "content": []
+                        }
+                    }
+                    self.wfile.write(f"event: response.output_item.added\ndata: {json.dumps(item_added, ensure_ascii=False)}\n\n".encode())
                     for ci, cp in enumerate(item["content"]):
-                        ev = {"type": "response.output_text.done", "item_id": item["id"], "content_index": ci, "text": cp["text"]}
-                        self.wfile.write(f"event: response.output_text.done\ndata: {json.dumps(ev)}\n\n".encode())
+                        part_added = {
+                            "type": "response.content_part.added",
+                            "response_id": rid,
+                            "item_id": item["id"],
+                            "output_index": item_idx,
+                            "content_index": ci,
+                            "part": {
+                                "type": "text",
+                                "text": ""
+                            }
+                        }
+                        self.wfile.write(f"event: response.content_part.added\ndata: {json.dumps(part_added, ensure_ascii=False)}\n\n".encode())
+                        ev_delta = {"type": "response.output_text.delta", "response_id": rid, "item_id": item["id"], "output_index": item_idx, "content_index": ci, "delta": cp["text"]}
+                        self.wfile.write(f"event: response.output_text.delta\ndata: {json.dumps(ev_delta, ensure_ascii=False)}\n\n".encode())
+                        ev = {"type": "response.output_text.done", "response_id": rid, "item_id": item["id"], "output_index": item_idx, "content_index": ci, "text": cp["text"]}
+                        self.wfile.write(f"event: response.output_text.done\ndata: {json.dumps(ev, ensure_ascii=False)}\n\n".encode())
+                    item_done = {
+                        "type": "response.output_item.done",
+                        "response_id": rid,
+                        "output_index": item_idx,
+                        "item": {
+                            "id": item["id"],
+                            "object": "item",
+                            "type": "message",
+                            "status": "completed",
+                            "role": item.get("role", "assistant"),
+                            "content": [{"type": "text", "text": cp["text"]} for cp in item["content"]]
+                        }
+                    }
+                    self.wfile.write(f"event: response.output_item.done\ndata: {json.dumps(item_done, ensure_ascii=False)}\n\n".encode())
             resp_obj = {"id": rid, "object": "response", "status": "completed", "model": model_name, "output": output,
                         "usage": {"input_tokens": len(prompt)//4, "output_tokens": len(text or "")//4, "total_tokens": (len(prompt)+len(text or ""))//4}}
-            self.wfile.write(f"event: response.completed\ndata: {json.dumps({'type': 'response.completed', 'response': resp_obj})}\n\n".encode())
+            self.wfile.write(f"event: response.completed\ndata: {json.dumps({'type': 'response.completed', 'response': resp_obj}, ensure_ascii=False)}\n\n".encode())
             self.wfile.flush()
         else:
             self.send_json({"id": rid, "object": "response", "created_at": int(time.time()), "status": "completed",

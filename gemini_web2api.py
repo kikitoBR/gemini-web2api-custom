@@ -648,7 +648,7 @@ class GeminiHandler(BaseHTTPRequestHandler):
                         messages.append(m)
                     else:
                         role = item.get("role", "user")
-                        content = item.get("content", "")
+                        content = item.get("content") or item.get("text", "")
                         if isinstance(content, list):
                             content = " ".join(c.get("text", "") for c in content if c.get("type") in ("text", "input_text"))
                         messages.append({"role": role, "content": content})
@@ -662,14 +662,50 @@ class GeminiHandler(BaseHTTPRequestHandler):
             self.send_json({"error": {"message": "empty input"}}, 400)
             return
 
+        rid = f"resp_{uuid.uuid4().hex[:16]}"
+        mid = f"msg_{uuid.uuid4().hex[:12]}"
+        stream = req.get("stream", False)
+
+        if stream and not tools:
+            try:
+                self.send_response(200)
+                self.send_header("Content-Type", "text/event-stream")
+                self.send_header("Cache-Control", "no-cache")
+                self.send_header("Access-Control-Allow-Origin", "*")
+                self.end_headers()
+                ev = {"type": "response.created", "response": {"id": rid, "object": "response", "status": "in_progress", "model": model_name, "output": []}}
+                self.wfile.write(f"event: response.created\ndata: {json.dumps(ev, ensure_ascii=False)}\n\n".encode())
+                self.wfile.flush()
+
+                text_acc = ""
+                for delta_text in gemini_stream_generate_iter(prompt, model_id, think_mode):
+                    text_acc += delta_text
+                    ev = {"type": "response.output_text.delta", "response_id": rid, "item_id": mid, "output_index": 0, "content_index": 0, "delta": delta_text}
+                    self.wfile.write(f"event: response.output_text.delta\ndata: {json.dumps(ev, ensure_ascii=False)}\n\n".encode())
+                    self.wfile.flush()
+
+                ev = {"type": "response.output_text.done", "response_id": rid, "item_id": mid, "output_index": 0, "content_index": 0, "text": text_acc}
+                self.wfile.write(f"event: response.output_text.done\ndata: {json.dumps(ev, ensure_ascii=False)}\n\n".encode())
+
+                output = [{"type": "message", "id": mid, "role": "assistant", "status": "completed",
+                           "content": [{"type": "output_text", "text": text_acc, "annotations": []}]}]
+                resp_obj = {"id": rid, "object": "response", "status": "completed", "model": model_name, "output": output,
+                            "usage": {"input_tokens": len(prompt)//4, "output_tokens": len(text_acc)//4, "total_tokens": (len(prompt)+len(text_acc))//4}}
+                self.wfile.write(f"event: response.completed\ndata: {json.dumps({'type': 'response.completed', 'response': resp_obj}, ensure_ascii=False)}\n\n".encode())
+                self.wfile.flush()
+            except (BrokenPipeError, ConnectionResetError):
+                pass
+            except Exception as e:
+                log(f"Responses stream error: {e}")
+            return
+
+        # Non-streaming (or tool calling which needs full response)
         try:
             text, tool_calls = self._call_gemini(prompt, model_id, think_mode, tools)
         except Exception as e:
             self.send_json({"error": {"message": f"upstream error: {e}"}}, 502)
             return
 
-        rid = f"resp_{uuid.uuid4().hex[:16]}"
-        mid = f"msg_{uuid.uuid4().hex[:12]}"
         output = []
         if tool_calls:
             for tc in tool_calls:
@@ -679,26 +715,33 @@ class GeminiHandler(BaseHTTPRequestHandler):
             output.append({"type": "message", "id": mid, "role": "assistant", "status": "completed",
                            "content": [{"type": "output_text", "text": text or "", "annotations": []}]})
 
-        if req.get("stream"):
-            self.send_response(200)
-            self.send_header("Content-Type", "text/event-stream")
-            self.send_header("Cache-Control", "no-cache")
-            self.send_header("Access-Control-Allow-Origin", "*")
-            self.end_headers()
-            ev = {"type": "response.created", "response": {"id": rid, "object": "response", "status": "in_progress", "model": model_name, "output": []}}
-            self.wfile.write(f"event: response.created\ndata: {json.dumps(ev)}\n\n".encode())
-            for item in output:
-                if item["type"] == "function_call":
-                    ev = {"type": "response.function_call_arguments.done", "item_id": item["id"], "call_id": item["call_id"], "name": item["name"], "arguments": item["arguments"]}
-                    self.wfile.write(f"event: response.function_call_arguments.done\ndata: {json.dumps(ev)}\n\n".encode())
-                elif item["type"] == "message":
-                    for ci, cp in enumerate(item["content"]):
-                        ev = {"type": "response.output_text.done", "item_id": item["id"], "content_index": ci, "text": cp["text"]}
-                        self.wfile.write(f"event: response.output_text.done\ndata: {json.dumps(ev)}\n\n".encode())
-            resp_obj = {"id": rid, "object": "response", "status": "completed", "model": model_name, "output": output,
-                        "usage": {"input_tokens": len(prompt)//4, "output_tokens": len(text)//4, "total_tokens": (len(prompt)+len(text))//4}}
-            self.wfile.write(f"event: response.completed\ndata: {json.dumps({'type': 'response.completed', 'response': resp_obj})}\n\n".encode())
-            self.wfile.flush()
+        if stream:
+            try:
+                self.send_response(200)
+                self.send_header("Content-Type", "text/event-stream")
+                self.send_header("Cache-Control", "no-cache")
+                self.send_header("Access-Control-Allow-Origin", "*")
+                self.end_headers()
+                ev = {"type": "response.created", "response": {"id": rid, "object": "response", "status": "in_progress", "model": model_name, "output": []}}
+                self.wfile.write(f"event: response.created\ndata: {json.dumps(ev, ensure_ascii=False)}\n\n".encode())
+                for item in output:
+                    if item["type"] == "function_call":
+                        ev = {"type": "response.function_call_arguments.done", "item_id": item["id"], "call_id": item["call_id"], "name": item["name"], "arguments": item["arguments"]}
+                        self.wfile.write(f"event: response.function_call_arguments.done\ndata: {json.dumps(ev, ensure_ascii=False)}\n\n".encode())
+                    elif item["type"] == "message":
+                        for ci, cp in enumerate(item["content"]):
+                            ev_delta = {"type": "response.output_text.delta", "response_id": rid, "item_id": item["id"], "output_index": 0, "content_index": ci, "delta": cp["text"]}
+                            self.wfile.write(f"event: response.output_text.delta\ndata: {json.dumps(ev_delta, ensure_ascii=False)}\n\n".encode())
+                            ev = {"type": "response.output_text.done", "response_id": rid, "item_id": item["id"], "output_index": 0, "content_index": ci, "text": cp["text"]}
+                            self.wfile.write(f"event: response.output_text.done\ndata: {json.dumps(ev, ensure_ascii=False)}\n\n".encode())
+                resp_obj = {"id": rid, "object": "response", "status": "completed", "model": model_name, "output": output,
+                            "usage": {"input_tokens": len(prompt)//4, "output_tokens": len(text)//4, "total_tokens": (len(prompt)+len(text))//4}}
+                self.wfile.write(f"event: response.completed\ndata: {json.dumps({'type': 'response.completed', 'response': resp_obj}, ensure_ascii=False)}\n\n".encode())
+                self.wfile.flush()
+            except (BrokenPipeError, ConnectionResetError):
+                pass
+            except Exception as e:
+                log(f"Responses sync stream error: {e}")
         else:
             self.send_json({"id": rid, "object": "response", "created_at": int(time.time()), "status": "completed",
                             "model": model_name, "output": output,
