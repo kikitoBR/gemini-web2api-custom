@@ -22,10 +22,13 @@ CONFIG = dict(DEFAULT_CONFIG)
 
 
 def load_config(path: str = None):
-    """Load config from JSON file."""
+    """Load config from JSON file and environment variables."""
     if path and os.path.exists(path):
         with open(path) as f:
             CONFIG.update(json.load(f))
+    env_keys = os.environ.get("API_KEYS") or os.environ.get("API_KEY")
+    if env_keys:
+        CONFIG["api_keys"] = [k.strip() for k in env_keys.split(",") if k.strip()]
     return CONFIG
 
 
