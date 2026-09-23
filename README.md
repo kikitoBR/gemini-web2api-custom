@@ -174,9 +174,13 @@ Create `config.json` in the same directory:
   "api_keys": ["sk-your-key"],
   "cookie_file": null,
   "proxy": null,
-  "log_requests": true
+  "log_requests": true,
+  "temporary_chats": false
 }
 ```
+
+Set `temporary_chats` to `true` to use Gemini Web temporary chats instead of
+persisting conversations to the account history.
 
 When `api_keys` is `[]`, authentication is disabled. When one or more keys are set, `/v1/*` endpoints require `Authorization: Bearer <key>` or `x-api-key: <key>`.
 
@@ -244,9 +248,27 @@ resp = client.chat.completions.create(
 )
 ```
 
+## Image Input
+
+OpenAI-style multimodal messages are supported for Chat Completions and the
+Responses API. Use either HTTP(S) image URLs or base64 data URLs:
+
+```python
+resp = client.chat.completions.create(
+    model="gemini-3.6-flash",
+    messages=[{
+        "role": "user",
+        "content": [
+            {"type": "text", "text": "Describe this image"},
+            {"type": "image_url", "image_url": {"url": "https://example.com/image.png"}}
+        ]
+    }]
+)
+```
+
 ## Limitations
 
-- **No image/multimodal input**: Gemini's image upload requires a proprietary streaming RPC protocol (WIZ/ProcessFile) that cannot be replicated in a standard HTTP proxy. Image inputs in messages will be ignored with a note.
+- **Image upload may require cookies**: Multimodal input uses Gemini Web's image upload endpoint. If anonymous upload fails, configure a Gemini cookie.
 - **Not real Pro/Ultra**: Without a paid subscription cookie, `gemini-3.1-pro` routes to the same Flash model. The "Pro" label is a UI preference, not a backend model switch.
 - **Single-turn only**: Each request is an independent conversation. Multi-turn context is simulated by including previous messages in the prompt.
 - **Rate limits**: Google may throttle high-frequency requests. The server retries automatically but sustained heavy use may be blocked.

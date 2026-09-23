@@ -164,9 +164,13 @@ Pro 路由需要 **Gemini Advanced** (付费订阅). 免费 Google 账号的 coo
   "api_keys": ["sk-your-key"],
   "cookie_file": null,
   "proxy": null,
-  "log_requests": true
+  "log_requests": true,
+  "temporary_chats": false
 }
 ```
+
+将 `temporary_chats` 设置为 `true` 后，请求会使用 Gemini 网页版的临时聊天，
+不会将对话保存在账号历史记录中。
 
 `api_keys` 为空数组 `[]` 时不校验密钥；填入一个或多个密钥后, `/v1/*` 接口需要 `Authorization: Bearer <key>` 或 `x-api-key: <key>`.
 
@@ -217,9 +221,27 @@ python gemini_web2api.py
 
 支持 Clash, V2Ray, Shadowsocks 等任何 HTTP 代理.
 
+## 图片输入
+
+Chat Completions 和 Responses API 支持 OpenAI 风格的多模态消息。图片可以使用
+HTTP(S) URL 或 base64 data URL:
+
+```python
+resp = client.chat.completions.create(
+    model="gemini-3.6-flash",
+    messages=[{
+        "role": "user",
+        "content": [
+            {"type": "text", "text": "描述这张图片"},
+            {"type": "image_url", "image_url": {"url": "https://example.com/image.png"}}
+        ]
+    }]
+)
+```
+
 ## 已知限制
 
-- **不支持图片/多模态输入**: Gemini 的图片上传需要专有的 WIZ streaming RPC 协议 (ProcessFile), 无法在标准 HTTP 代理中实现. 发送图片会被忽略并返回提示.
+- **图片上传可能需要 Cookie**: 多模态输入使用 Gemini 网页端图片上传接口。匿名上传失败时, 请配置 Gemini cookie。
 - **Pro/Ultra 非真实路由**: 无付费订阅 cookie 时, `gemini-3.1-pro` 实际路由到 Flash 模型. "Pro" 只是 UI 偏好标签.
 - **单轮对话**: 每次请求是独立对话, 多轮上下文通过在 prompt 中包含历史消息模拟.
 - **频率限制**: Google 可能限制高频请求, server 会自动重试但持续高负载可能被封.
