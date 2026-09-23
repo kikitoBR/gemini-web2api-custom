@@ -44,6 +44,14 @@ def _upload_images(images: list) -> list:
 
 
 class GeminiHandler(BaseHTTPRequestHandler):
+    def setup(self):
+        super().setup()
+        if hasattr(self, "connection") and self.connection:
+            try:
+                self.connection.settimeout(float(CONFIG.get("request_timeout_sec", 60)))
+            except Exception:
+                pass
+
     def log_message(self, fmt, *args):
         client_ip = self.client_address[0] if self.client_address else "-"
         log(f"{client_ip} {fmt % args}")

@@ -41,8 +41,46 @@ def _get_httpx_client():
     if _httpx_client is None and HAS_HTTPX:
         proxy = CONFIG.get("proxy")
         transport = httpx.HTTPTransport(proxy=proxy) if proxy else None
-        _httpx_client = httpx.Client(transport=transport, timeout=CONFIG["request_timeout_sec"], verify=True)
+        timeout = httpx.Timeout(timeout=float(CONFIG.get("request_timeout_sec", 60)), connect=10.0, read=45.0, write=15.0)
+        limits = httpx.Limits(max_keepalive_connections=10, max_connections=20, keepalive_expiry=15.0)
+        _httpx_client = httpx.Client(transport=transport, timeout=timeout, limits=limits, verify=True)
     return _httpx_client
+
+
+def fetch_latest_bl() -> str:
+    """Fetch the latest gemini_bl from gemini.google.com page."""
+    try:
+        req = urllib.request.Request(
+            "https://gemini.google.com/app",
+            headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
+        )
+        ctx = _get_ssl_ctx()
+        proxy = CONFIG.get("proxy")
+        if proxy:
+            opener = urllib.request.build_opener(
+                urllib.request.ProxyHandler({"http": proxy, "https": proxy}),
+                urllib.request.HTTPSHandler(context=ctx)
+            )
+            resp = opener.open(req, timeout=15)
+        else:
+            resp = urllib.request.urlopen(req, context=ctx, timeout=15)
+        html = resp.read().decode("utf-8", errors="replace")
+        m = re.search(r'(boq_assistant-bard-web-server_\d+\.\d+_p\d+)', html)
+        if m:
+            return m.group(1)
+    except Exception as e:
+        log(f"BL auto-update fetch failed: {e}")
+    return None
+
+
+def update_bl_if_needed() -> bool:
+    """Attempt to fetch and update gemini_bl. Returns True if updated."""
+    new_bl = fetch_latest_bl()
+    if new_bl and new_bl != CONFIG.get("gemini_bl"):
+        log(f"BL auto-updated: {CONFIG.get('gemini_bl')} -> {new_bl}")
+        CONFIG["gemini_bl"] = new_bl
+        return True
+    return False
 
 
 def load_cookie() -> tuple:
@@ -224,6 +262,16 @@ def generate(prompt: str, model_id: int, think_mode: int, file_refs: list = None
                 resp = urllib.request.urlopen(req, context=ctx, timeout=CONFIG["request_timeout_sec"])
             raw = resp.read().decode("utf-8", errors="replace")
             return extract_response_text(raw)
+        except urllib.error.HTTPError as e:
+            if e.code == 405 and update_bl_if_needed():
+                url = _get_url()
+                log("gemini_bl auto-updated after 405, retrying request...")
+                last_err = e
+                continue
+            last_err = e
+            if attempt < CONFIG["retry_attempts"] - 1:
+                log(f"Retry {attempt+1}/{CONFIG['retry_attempts']}: {e}")
+                time.sleep(CONFIG["retry_delay_sec"])
         except Exception as e:
             last_err = e
             if attempt < CONFIG["retry_attempts"] - 1:
@@ -273,6 +321,12 @@ def generate_stream(prompt: str, model_id: int, think_mode: int, file_refs: list
                                 yield delta
             return
         except Exception as e:
+            if HAS_HTTPX and hasattr(e, 'response') and getattr(e.response, 'status_code', 0) == 405:
+                if update_bl_if_needed():
+                    url = _get_url()
+                    log("gemini_bl auto-updated after 405, retrying stream...")
+                    last_err = e
+                    continue
             last_err = e
             if attempt < CONFIG["retry_attempts"] - 1:
                 log(f"Stream retry {attempt+1}/{CONFIG['retry_attempts']}: {e}")

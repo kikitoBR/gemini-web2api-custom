@@ -52,11 +52,11 @@ DEFAULT_CONFIG = {
     "host": "0.0.0.0",
     "retry_attempts": 3,
     "retry_delay_sec": 2,
-    "request_timeout_sec": 180,
+    "request_timeout_sec": 60,
     "gemini_bl": "boq_assistant-bard-web-server_20260716.08_p0",
     "auth_user": None,
     "xsrf_token": None,
-    "default_model": "gemini-3.6-flash",
+    "default_model": "gemini-3.8-flash",
     "log_requests": True,
     "cookie_file": None,
     "proxy": None,
@@ -71,9 +71,13 @@ CONFIG = dict(DEFAULT_CONFIG)
 #   1=FAST, 2=THINKING, 3=PRO, 4=AUTO, 5=FAST_DYNAMIC_THINKING, 6=FLASH_LITE
 
 MODELS = {
+    "gemini-3.8-flash": {
+        "mode": 1, "think": 4,
+        "desc": "Latest all-around model (Gemini 3.8 Flash)",
+    },
     "gemini-3.7-flash": {
         "mode": 1, "think": 4,
-        "desc": "Latest all-around model (Gemini 3.7 Flash)",
+        "desc": "All-around model (Gemini 3.7 Flash)",
     },
     "gemini-3.6-flash": {
         "mode": 1, "think": 4,
@@ -81,7 +85,7 @@ MODELS = {
     },
     "gemini-3.5-flash": {
         "mode": 1, "think": 4,
-        "desc": "Alias for gemini-3.6-flash (backend upgraded)",
+        "desc": "Alias for gemini-3.8-flash (backend upgraded)",
     },
     "gemini-3.5-flash-thinking": {
         "mode": 2, "think": 0,
